@@ -12,8 +12,9 @@ import (
 )
 
 type Parser struct {
-	reader *csv.Reader
-	header []string
+	reader  *csv.Reader
+	header  []string
+	options Options
 }
 
 type Options struct {
@@ -53,7 +54,8 @@ type Options struct {
 	// By default, each call to Read returns newly allocated memory owned by the caller.
 	ReuseRecord bool
 
-	UseHeader bool
+	UseHeader  bool
+	TimeLayout string
 }
 
 func New(inputStream io.Reader, options Options) Parser {
@@ -62,10 +64,6 @@ func New(inputStream io.Reader, options Options) Parser {
 	var header []string
 	var err error
 	if options.UseHeader {
-		// Read the header line to:
-		//  - get the number of fields
-		//  - ignore the first line
-		//  - throw an error in case of error
 		header, err = csvReader.Read()
 		if err != nil {
 			log.Fatal(err)
@@ -80,8 +78,9 @@ func New(inputStream io.Reader, options Options) Parser {
 	//csvReader.ReuseRecord = options.ReuseRecord
 
 	return Parser{
-		reader: csvReader,
-		header: header,
+		reader:  csvReader,
+		header:  header,
+		options: options,
 	}
 }
 
@@ -90,7 +89,7 @@ var boolValues = map[string]rune{
 	"true": 1,
 }
 
-func (p *Parser) Read(value interface{}) error {
+func (p *Parser) ReadInto(value interface{}) error {
 	csvLine, err := p.reader.Read()
 	if err != nil {
 		return err
@@ -98,48 +97,69 @@ func (p *Parser) Read(value interface{}) error {
 
 	csvMap := toMap(p.header, csvLine)
 
-	valueReflect := reflect.ValueOf(value)
-	csvReflect := reflect.ValueOf(csvMap).MapRange()
+	csvTagsMap := getCsvTags(value)
 
-	for csvReflect.Next() {
-		v := csvReflect.Value()
-		key := csvReflect.Key().String()
-		valueField := valueReflect.Elem().FieldByName(key)
+	for key, v := range csvMap {
+		valueField, found := csvTagsMap[key]
+		if !found {
+			continue
+		}
+
+		valueFieldType := valueField.Type()
 
 		switch valueField.Kind() {
 		case reflect.Int:
-			valueInt, err := strconv.Atoi(v.String())
+			valueInt, err := strconv.Atoi(v)
 			if err != nil {
-				return errors.New(fmt.Sprintf("cannot parse %s into type %s", v.String(), valueField.Type()))
+				return errors.New(fmt.Sprintf("cannot parse %s into type %s", v, valueFieldType))
 			}
 			valueField.SetInt(int64(valueInt))
-			continue
+			break
 		case reflect.String:
-			valueField.SetString(v.String())
+			valueField.SetString(v)
+			break
 		case reflect.Bool:
-			_, valueBool := boolValues[v.String()]
+			_, valueBool := boolValues[v]
 			valueField.SetBool(valueBool)
+			break
 		case reflect.Struct:
-			switch valueField.Type().String() {
+			switch valueFieldType.String() {
 			case "time.Time":
-				layout := "2006-01-02 15:04:05"
-				t, err := time.Parse(layout, v.String())
+				layout := p.options.TimeLayout
+				t, err := time.Parse(layout, v)
 				if err != nil {
-					return errors.New(fmt.Sprintf("cannot parse %s into type %s", v.String(), valueField.Type()))
+					return errors.New(fmt.Sprintf("cannot parse %s into type %s", v, valueFieldType))
 				}
 				valueField.Set(reflect.ValueOf(t))
+				break
 			default:
-				return errors.New(fmt.Sprintf("this lib cannot parse %s", valueField.Type()))
+				return errors.New(fmt.Sprintf("this lib cannot parse %s", valueFieldType))
 			}
+			break
 		default:
-			return errors.New(fmt.Sprintf("this lib cannot parse %s", valueField.Type()))
+			return errors.New(fmt.Sprintf("this lib cannot parse %s", valueFieldType))
 		}
-
 	}
 
-	//valueReflect.Elem().Field(0).Set("Joao")
-
 	return nil
+}
+
+func getCsvTags(value interface{}) map[string]reflect.Value {
+	valueReflect := reflect.ValueOf(value).Elem()
+	valueTypeReflect := reflect.TypeOf(value).Elem()
+
+	var csvTagsMap = map[string]reflect.Value{}
+
+	for i := 0; i < valueTypeReflect.NumField(); i++ {
+		field := valueTypeReflect.Field(i)
+
+		tag := field.Tag.Get("csv")
+		fieldName := field.Name
+
+		valueField := valueReflect.FieldByName(fieldName)
+		csvTagsMap[tag] = valueField
+	}
+	return csvTagsMap
 }
 
 func toMap(header []string, line []string) map[string]string {

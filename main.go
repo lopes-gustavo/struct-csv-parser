@@ -3,32 +3,41 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
-	"net/http"
 	_ "net/http/pprof"
 	"strings"
-	"structCsvParser/entities"
 	"structCsvParser/parser"
+	"time"
 )
 
-func main() {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
+type User struct {
+	ID        int       `csv:"id"`
+	FirstName string    `csv:"first_name"`
+	LastName  string    `csv:"last_name"`
+	Username  string    `csv:"username"`
+	CreatedAt time.Time `csv:"created_at"`
+}
 
-	in := `ID,FirstName,LastName,Username,CreatedAt
+var withHeader = `id,first_name,last_name,username,created_at
 1,"Rob","Pike",rob,"2010-01-27 00:00:00"
 2,Ken,Thompson,ken,"2010-01-27 00:00:00"
 3,"Robert","Griesemer","gri","2010-01-27 00:00:00"
 `
-	r := strings.NewReader(in)
+
+var withoutHeader = `1,"Rob","Pike",rob,"2010-01-27 00:00:00"
+2,Ken,Thompson,ken,"2010-01-27 00:00:00"
+3,"Robert","Griesemer","gri","2010-01-27 00:00:00"
+`
+
+func main() {
+	r := strings.NewReader(withHeader)
 	p := parser.New(r, parser.Options{
-		UseHeader: true,
+		UseHeader:  true,
+		TimeLayout: "2006-01-02 15:04:05",
 	})
 
 	for {
-		var student entities.Student
-		err := p.Read(&student)
+		var user User
+		err := p.ReadInto(&user)
 
 		if err == io.EOF {
 			break
@@ -37,6 +46,6 @@ func main() {
 			fmt.Println(err)
 		}
 
-		fmt.Println(student)
+		fmt.Printf("%#v\n", &user)
 	}
 }
