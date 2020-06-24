@@ -1,11 +1,12 @@
-package main
+package parser_test
 
 import (
 	"fmt"
 	"io"
 	"log"
 	"strings"
-	"structCsvParser/parser"
+	parser "structCsvParser"
+	"testing"
 	"time"
 )
 
@@ -35,11 +36,6 @@ var withoutHeader = `1,"Rob","Pike",rob,"2010-01-27 00:00:00"
 2,Ken,Thompson,ken,"2010-01-27 00:00:00"
 3,"Robert","Griesemer","gri","2010-01-27 00:00:00"
 `
-
-func main() {
-	runWithHeader()
-	runWithoutHeader()
-}
 
 func runWithHeader() {
 	reader := strings.NewReader(withHeader)
@@ -91,4 +87,9 @@ func runWithoutHeader() {
 
 		fmt.Printf("%#v\n", &user)
 	}
+}
+
+func TestParser(t *testing.T) {
+	runWithHeader()
+	runWithoutHeader()
 }
