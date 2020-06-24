@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"reflect"
 	"strconv"
 	"time"
@@ -22,7 +21,7 @@ type Options struct {
 	TimeLayout string
 }
 
-func New(inputStream io.Reader, options Options) Parser {
+func New(inputStream io.Reader, options Options) (Parser, error) {
 	csvReader := csv.NewReader(inputStream)
 
 	var header []string
@@ -30,22 +29,15 @@ func New(inputStream io.Reader, options Options) Parser {
 	if options.UseHeader {
 		header, err = csvReader.Read()
 		if err != nil {
-			log.Fatal(err)
+			return Parser{}, err
 		}
 	}
-
-	//csvReader.Comma = options.Comma
-	//csvReader.Comment = options.Comment
-	//csvReader.FieldsPerRecord = options.FieldsPerRecord
-	//csvReader.LazyQuotes = options.LazyQuotes
-	//csvReader.TrimLeadingSpace = options.TrimLeadingSpace
-	//csvReader.ReuseRecord = options.ReuseRecord
 
 	return Parser{
 		Reader:  csvReader,
 		header:  header,
 		options: options,
-	}
+	}, nil
 }
 
 var boolValues = map[string]rune{
@@ -54,45 +46,55 @@ var boolValues = map[string]rune{
 }
 
 func (p *Parser) ReadInto(value interface{}) error {
-	csvLine, err := p.reader.Read()
+	csvValuesSlice, err := p.Reader.Read()
 	if err != nil {
 		return err
 	}
 
-	csvMap := toMap(p.header, csvLine)
+	csvValuesMap := p.toMap(csvValuesSlice)
+	csvFieldNameToCsvTagMap := getCsvTags(value)
 
-	csvTagsMap := getCsvTags(value)
+	for csvHeader, csvValue := range csvValuesMap {
 
-	for key, v := range csvMap {
-		valueField, found := csvTagsMap[key]
-		if !found {
-			continue
+		valueReflect := reflect.ValueOf(value).Elem()
+
+		var valueField reflect.Value
+
+		if p.options.UseHeader {
+			fieldName, found := csvFieldNameToCsvTagMap[csvHeader]
+			if !found {
+				continue
+			}
+			valueField = valueReflect.FieldByName(fieldName)
+		} else {
+			fieldNum, _ := strconv.Atoi(csvHeader)
+			valueField = valueReflect.Field(fieldNum)
 		}
 
 		valueFieldType := valueField.Type()
 
 		switch valueField.Kind() {
 		case reflect.Int:
-			valueInt, err := strconv.Atoi(v)
+			valueInt, err := strconv.Atoi(csvValue)
 			if err != nil {
-				return errors.New(fmt.Sprintf("cannot parse %s into type %s", v, valueFieldType))
+				return errors.New(fmt.Sprintf("cannot parse %s into type %s", csvValue, valueFieldType))
 			}
 			valueField.SetInt(int64(valueInt))
 			break
 		case reflect.String:
-			valueField.SetString(v)
+			valueField.SetString(csvValue)
 			break
 		case reflect.Bool:
-			_, valueBool := boolValues[v]
+			_, valueBool := boolValues[csvValue]
 			valueField.SetBool(valueBool)
 			break
 		case reflect.Struct:
 			switch valueFieldType.String() {
 			case "time.Time":
 				layout := p.options.TimeLayout
-				t, err := time.Parse(layout, v)
+				t, err := time.Parse(layout, csvValue)
 				if err != nil {
-					return errors.New(fmt.Sprintf("cannot parse %s into type %s", v, valueFieldType))
+					return errors.New(fmt.Sprintf("cannot parse %s into type %s", csvValue, valueFieldType))
 				}
 				valueField.Set(reflect.ValueOf(t))
 				break
@@ -108,11 +110,10 @@ func (p *Parser) ReadInto(value interface{}) error {
 	return nil
 }
 
-func getCsvTags(value interface{}) map[string]reflect.Value {
-	valueReflect := reflect.ValueOf(value).Elem()
+func getCsvTags(value interface{}) map[string]string {
 	valueTypeReflect := reflect.TypeOf(value).Elem()
 
-	var csvTagsMap = map[string]reflect.Value{}
+	var csvTagsMap = map[string]string{}
 
 	for i := 0; i < valueTypeReflect.NumField(); i++ {
 		field := valueTypeReflect.Field(i)
@@ -120,17 +121,22 @@ func getCsvTags(value interface{}) map[string]reflect.Value {
 		tag := field.Tag.Get("csv")
 		fieldName := field.Name
 
-		valueField := valueReflect.FieldByName(fieldName)
-		csvTagsMap[tag] = valueField
+		csvTagsMap[tag] = fieldName
 	}
 	return csvTagsMap
 }
 
-func toMap(header []string, line []string) map[string]string {
+func (p *Parser) toMap(line []string) map[string]string {
 	var out = make(map[string]string)
 
-	for index, h := range header {
-		out[h] = line[index]
+	if p.options.UseHeader {
+		for index, h := range p.header {
+			out[h] = line[index]
+		}
+	} else {
+		for index := range line {
+			out[strconv.Itoa(index)] = line[index]
+		}
 	}
 
 	return out
