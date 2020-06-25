@@ -1,4 +1,4 @@
-package parser_test
+package structCsvParser_test
 
 import (
 	"fmt"

@@ -1,4 +1,6 @@
-package parser
+// Package structCsvParser parses a csv into a struct instead of the default slice
+// It uses the builtin encoding/csv for primary parsing
+package structCsvParser
 
 import (
 	"encoding/csv"
@@ -10,19 +12,40 @@ import (
 	"time"
 )
 
+// Parser is the main struct. It should not be created directly, but with structCsvParser.New
 type Parser struct {
-	Reader  *csv.Reader
-	header  []string
-	options Options
+	// Reader is the underlying csv.Reader
+	// Should be edited to change csv reading properties, like Comma separator or Quotes
+	Reader     *csv.Reader
+	header     []string
+	options    Options
+	boolValues map[string]rune
 }
 
 type Options struct {
 	UseHeader  bool
 	TimeLayout string
+	BoolValues []string
 }
 
-func New(inputStream io.Reader, options Options) (Parser, error) {
-	csvReader := csv.NewReader(inputStream)
+var defaultBoolValues = map[string]rune{
+	"1":    1,
+	"true": 1,
+}
+
+// sliceToMap is a helper function to create a map in which the keys are the strings passed to it
+// Its purpose is indexing, for faster reading
+func sliceToMap(ss []string) map[string]rune {
+	var out = map[string]rune{}
+	for _, s := range ss {
+		out[s] = 1
+	}
+	return out
+}
+
+// Creates a new parser
+func New(reader io.Reader, options Options) (Parser, error) {
+	csvReader := csv.NewReader(reader)
 
 	var header []string
 	var err error
@@ -33,18 +56,21 @@ func New(inputStream io.Reader, options Options) (Parser, error) {
 		}
 	}
 
+	boolValues := defaultBoolValues
+	if options.BoolValues != nil {
+		boolValues = sliceToMap(options.BoolValues)
+	}
+
 	return Parser{
-		Reader:  csvReader,
-		header:  header,
-		options: options,
+		Reader:     csvReader,
+		header:     header,
+		options:    options,
+		boolValues: boolValues,
 	}, nil
 }
 
-var boolValues = map[string]rune{
-	"1":    1,
-	"true": 1,
-}
-
+// Reads one line from the csv and tries to put it into the provided struct, which must be passed as reference
+// value must be a pointer to a struct
 func (p *Parser) ReadInto(value interface{}) error {
 	csvValuesSlice, err := p.Reader.Read()
 	if err != nil {
@@ -52,7 +78,7 @@ func (p *Parser) ReadInto(value interface{}) error {
 	}
 
 	csvValuesMap := p.toMap(csvValuesSlice)
-	csvFieldNameToCsvTagMap := getCsvTags(value)
+	csvFieldNameToCsvTagMap := getFieldNamesFromCsvTag(value)
 
 	for csvHeader, csvValue := range csvValuesMap {
 
@@ -85,7 +111,7 @@ func (p *Parser) ReadInto(value interface{}) error {
 			valueField.SetString(csvValue)
 			break
 		case reflect.Bool:
-			_, valueBool := boolValues[csvValue]
+			_, valueBool := defaultBoolValues[csvValue]
 			valueField.SetBool(valueBool)
 			break
 		case reflect.Struct:
@@ -110,7 +136,9 @@ func (p *Parser) ReadInto(value interface{}) error {
 	return nil
 }
 
-func getCsvTags(value interface{}) map[string]string {
+// reflects into the provided struct looking for the `csv` tag
+// Ignores if the csv tag is not provided or is "-"
+func getFieldNamesFromCsvTag(value interface{}) map[string]string {
 	valueTypeReflect := reflect.TypeOf(value).Elem()
 
 	var csvTagsMap = map[string]string{}
@@ -121,11 +149,17 @@ func getCsvTags(value interface{}) map[string]string {
 		tag := field.Tag.Get("csv")
 		fieldName := field.Name
 
+		if tag == "" || tag == "-" {
+			continue
+		}
+
 		csvTagsMap[tag] = fieldName
 	}
 	return csvTagsMap
 }
 
+// toMap merge a csv line (which is a slice) into a map, being the keys the header names
+// In case Options.UseHeader is false, the keys are the fields positions
 func (p *Parser) toMap(line []string) map[string]string {
 	var out = make(map[string]string)
 
