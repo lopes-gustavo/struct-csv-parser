@@ -4,13 +4,23 @@ package structCsvParser
 
 import (
 	"encoding/csv"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"strconv"
 	"time"
 )
+
+type ConverterFunc = func(string) interface{}
+
+type ParseError struct {
+	OriginalError error
+	Message       string
+}
+
+func (err ParseError) Error() string {
+	return fmt.Sprintf("Parse Error")
+}
 
 // Parser is the main struct. It should not be created directly, but with structCsvParser.New
 type Parser struct {
@@ -23,9 +33,10 @@ type Parser struct {
 }
 
 type Options struct {
-	UseHeader  bool
-	TimeLayout string
-	BoolValues []string
+	UseHeader        bool
+	TimeLayout       string
+	BoolValues       []string
+	CustomConverters map[string]ConverterFunc
 }
 
 var defaultBoolValues = map[string]rune{
@@ -52,7 +63,7 @@ func New(reader io.Reader, options Options) (Parser, error) {
 	if options.UseHeader {
 		header, err = csvReader.Read()
 		if err != nil {
-			return Parser{}, err
+			return Parser{}, ParseError{OriginalError: err}
 		}
 	}
 
@@ -71,7 +82,103 @@ func New(reader io.Reader, options Options) (Parser, error) {
 
 // Reads one line from the csv and tries to put it into the provided struct, which must be passed as reference
 // value must be a pointer to a struct
-func (p *Parser) ReadInto(value interface{}) error {
+// It will throw io.EOF when the file ends
+func (p *Parser) ReadInto(target interface{}) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = ParseError{Message: "could not parse csv line into target"}
+		}
+	}()
+
+	if target == nil {
+		return ParseError{Message: "value must be a non-nil pointer to a struct"}
+	}
+	val := reflect.ValueOf(target)
+	typ := val.Type()
+	if typ.Kind() != reflect.Ptr || val.IsNil() {
+		return ParseError{Message: "value must be a non-nil pointer to a struct"}
+	}
+	targetType := typ.Elem()
+
+	csvValuesSlice, err := p.Reader.Read()
+	if err == io.EOF {
+		return err
+	}
+	if err != nil {
+		return ParseError{OriginalError: err}
+	}
+
+	csvValuesMap := p.toMap(csvValuesSlice)
+	csvFieldNameToCsvTagMap := getFieldNamesFromCsvTag(targetType)
+
+	for csvHeader, csvValue := range csvValuesMap {
+
+		valueReflect := reflect.ValueOf(target).Elem()
+
+		var valueField reflect.Value
+
+		if p.options.UseHeader {
+			fieldName, found := csvFieldNameToCsvTagMap[csvHeader]
+			if !found {
+				continue
+			}
+			valueField = valueReflect.FieldByName(fieldName)
+		} else {
+			fieldNum, _ := strconv.Atoi(csvHeader)
+			valueField = valueReflect.Field(fieldNum)
+		}
+
+		valueFieldType := valueField.Type()
+
+		switch valueField.Kind() {
+		case reflect.Int:
+			valueInt, err := strconv.Atoi(csvValue)
+			if err != nil {
+				return ParseError{Message: fmt.Sprintf("cannot parse %s into type %s", csvValue, valueFieldType)}
+			}
+			valueField.SetInt(int64(valueInt))
+			break
+		case reflect.String:
+			valueField.SetString(csvValue)
+			break
+		case reflect.Bool:
+			_, valueBool := defaultBoolValues[csvValue]
+			valueField.SetBool(valueBool)
+			break
+		case reflect.Struct:
+			switch valueFieldType.String() {
+			case "time.Time":
+				layout := p.options.TimeLayout
+				t, err := time.Parse(layout, csvValue)
+				if err != nil {
+					return ParseError{
+						OriginalError: err,
+						Message:       fmt.Sprintf("cannot parse %s into type %s", csvValue, valueFieldType),
+					}
+				}
+				valueField.Set(reflect.ValueOf(t))
+				break
+			default:
+				converterFunc, found := p.options.CustomConverters[csvHeader]
+				if !found {
+					return ParseError{Message: fmt.Sprintf("this lib cannot parse %s", valueFieldType)}
+				}
+				converted := converterFunc(csvValue)
+				valueField.Set(reflect.ValueOf(converted))
+			}
+			break
+		default:
+			return ParseError{Message: fmt.Sprintf("this lib cannot parse %s", valueFieldType)}
+		}
+	}
+
+	return nil
+}
+
+/*
+// Reads all lines from the csv and tries to put it into the provided slice of struct, which must be passed as reference
+// value must be a slice of struct
+func (p *Parser) ReadAllInto(value interface{}) error {
 	csvValuesSlice, err := p.Reader.Read()
 	if err != nil {
 		return err
@@ -135,12 +242,11 @@ func (p *Parser) ReadInto(value interface{}) error {
 
 	return nil
 }
+*/
 
 // reflects into the provided struct looking for the `csv` tag
 // Ignores if the csv tag is not provided or is "-"
-func getFieldNamesFromCsvTag(value interface{}) map[string]string {
-	valueTypeReflect := reflect.TypeOf(value).Elem()
-
+func getFieldNamesFromCsvTag(valueTypeReflect reflect.Type) map[string]string {
 	var csvTagsMap = map[string]string{}
 
 	for i := 0; i < valueTypeReflect.NumField(); i++ {
